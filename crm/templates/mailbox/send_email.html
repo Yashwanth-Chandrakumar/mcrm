@@ -399,8 +399,17 @@
         </a>
 
         <div class="header">
-            <h1><i class="fas fa-edit"></i> Compose Email</h1>
-            <p>Send a new email from {{ account.email_address }}</p>
+            <h1>
+                <i class="fas fa-{% if reply_to_email %}reply{% else %}edit{% endif %}"></i> 
+                {% if reply_to_email %}Reply to Email{% else %}Compose Email{% endif %}
+            </h1>
+            <p>
+                {% if reply_to_email %}
+                    Replying to "{{ reply_to_email.subject }}" from {{ reply_to_email.sender }}
+                {% else %}
+                    Send a new email from {{ account.email_address }}
+                {% endif %}
+            </p>
         </div>
 
         {% if messages %}
@@ -416,8 +425,8 @@
         <div class="compose-container">
             <div class="compose-header">
                 <div class="compose-title">
-                    <i class="fas fa-paper-plane"></i>
-                    New Message
+                    <i class="fas fa-{% if reply_to_email %}reply{% else %}paper-plane{% endif %}"></i>
+                    {% if reply_to_email %}Reply Message{% else %}New Message{% endif %}
                 </div>
                 <div class="compose-actions">
                     <button class="header-btn" title="Save Draft">

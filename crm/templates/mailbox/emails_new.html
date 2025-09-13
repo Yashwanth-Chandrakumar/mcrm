@@ -1038,18 +1038,23 @@
                                 </div>
                                 
                                 <div class="email-actions">
-                                    <button type="button" class="email-action-btn" title="{% if email.is_starred %}Unstar{% else %}Star{% endif %}"
-                                            onclick="toggleStar({{ email.id }}, this)">
-                                        {% if email.is_starred %}
-                                            <i class="fas fa-star" style="color: #f59e0b;"></i>
-                                        {% else %}
-                                            <i class="far fa-star"></i>
-                                        {% endif %}
-                                    </button>
-                                    <button type="button" class="email-action-btn danger" title="Delete" 
-                                            onclick="deleteEmail({{ email.id }}, this)">
-                                        <i class="fas fa-trash"></i>
-                                    </button>
+                                    <form method="post" action="{% url 'star_email' account.id email.id %}" style="display: inline;">
+                                        {% csrf_token %}
+                                        <button type="submit" class="email-action-btn" title="{% if email.is_starred %}Unstar{% else %}Star{% endif %}">
+                                            {% if email.is_starred %}
+                                                <i class="fas fa-star" style="color: #f59e0b;"></i>
+                                            {% else %}
+                                                <i class="far fa-star"></i>
+                                            {% endif %}
+                                        </button>
+                                    </form>
+                                    <form method="post" action="{% url 'delete_email' account.id email.id %}" style="display: inline;">
+                                        {% csrf_token %}
+                                        <button type="submit" class="email-action-btn danger" title="Delete" 
+                                                onclick="return confirm('Are you sure you want to delete this email?')">
+                                            <i class="fas fa-trash"></i>
+                                        </button>
+                                    </form>
                                 </div>
                             </div>
                         </li>
@@ -1328,111 +1333,6 @@
                     break;
             }
         });
-        
-        // Individual email actions
-        function toggleStar(emailId, button) {
-            fetch(`/mailbox/{{ account.id }}/email/${emailId}/star/`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': getCSRFToken(),
-                    'X-Requested-With': 'XMLHttpRequest'
-                }
-            })
-            .then(response => {
-                if (!response.ok) throw new Error('Network response was not ok');
-                return response.json();
-            })
-            .then(data => {
-                if (data.success) {
-                    const icon = button.querySelector('i');
-                    if (data.is_starred) {
-                        icon.className = 'fas fa-star';
-                        icon.style.color = '#f59e0b';
-                        button.title = 'Unstar';
-                    } else {
-                        icon.className = 'far fa-star';
-                        icon.style.color = '';
-                        button.title = 'Star';
-                    }
-                } else {
-                    alert('Error: ' + (data.error || 'Unknown error'));
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                alert('Error toggling star. Please try again.');
-            });
-        }
-        
-        function deleteEmail(emailId, button) {
-            if (confirm('Are you sure you want to move this email to trash?')) {
-                fetch(`/mailbox/{{ account.id }}/email/${emailId}/delete/`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-CSRFToken': getCSRFToken(),
-                        'X-Requested-With': 'XMLHttpRequest'
-                    }
-                })
-                .then(response => {
-                    if (!response.ok) throw new Error('Network response was not ok');
-                    return response.json();
-                })
-                .then(data => {
-                    if (data.success) {
-                        // Remove the email item from the list
-                        const emailItem = button.closest('.email-item');
-                        if (emailItem) {
-                            emailItem.style.opacity = '0.5';
-                            emailItem.style.transform = 'translateX(-100%)';
-                            setTimeout(() => {
-                                emailItem.remove();
-                            }, 300);
-                        }
-                    } else {
-                        alert('Error: ' + (data.error || 'Unknown error'));
-                    }
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    alert('Error deleting email. Please try again.');
-                });
-            }
-        }
-        
-        function toggleReadStatus(emailId, button) {
-            fetch(`/mailbox/{{ account.id }}/email/${emailId}/read/`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': getCSRFToken(),
-                    'X-Requested-With': 'XMLHttpRequest'
-                }
-            })
-            .then(response => {
-                if (!response.ok) throw new Error('Network response was not ok');
-                return response.json();
-            })
-            .then(data => {
-                if (data.success) {
-                    const emailItem = button.closest('.email-item');
-                    if (data.is_read) {
-                        emailItem.classList.remove('unread');
-                        button.title = 'Mark as unread';
-                    } else {
-                        emailItem.classList.add('unread');
-                        button.title = 'Mark as read';
-                    }
-                } else {
-                    alert('Error: ' + (data.error || 'Unknown error'));
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                alert('Error toggling read status. Please try again.');
-            });
-        }
         
         // Auto-refresh every 5 minutes
         setInterval(() => {

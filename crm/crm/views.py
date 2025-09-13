@@ -250,6 +250,38 @@ def send_email(request, account_id):
     """Enhanced send email with CC, BCC, and better error handling"""
     account = get_object_or_404(EmailAccount, id=account_id)
     
+    # Handle reply functionality
+    reply_to_id = request.GET.get('reply_to')
+    reply_to_email = None
+    initial_data = {}
+    
+    if reply_to_id:
+        try:
+            reply_to_email = get_object_or_404(Email, id=reply_to_id, account=account)
+            # Prepare initial data for reply
+            initial_data = {
+                'recipient': reply_to_email.sender,
+                'subject': f"Re: {reply_to_email.subject}" if not reply_to_email.subject.startswith('Re:') else reply_to_email.subject,
+                'body': f"\n\n--- Original Message ---\nFrom: {reply_to_email.sender}\nDate: {reply_to_email.email_date.strftime('%Y-%m-%d %H:%M:%S')}\nSubject: {reply_to_email.subject}\n\n{reply_to_email.body}",
+            }
+            # Add CC if there were other recipients in the original email
+            original_recipients = reply_to_email.get_recipients_list()
+            original_cc = reply_to_email.get_cc_list()
+            
+            # Include original sender and other recipients in CC (excluding current account)
+            cc_list = []
+            for recipient in original_recipients:
+                if recipient.lower() != account.email_address.lower() and recipient.lower() != reply_to_email.sender.lower():
+                    cc_list.append(recipient)
+            cc_list.extend(original_cc)
+            
+            if cc_list:
+                initial_data['cc'] = ', '.join(cc_list)
+                
+        except Email.DoesNotExist:
+            messages.error(request, 'Original email not found.')
+            return redirect('view_emails', account_id=account.id)
+    
     if request.method == 'POST':
         form = EmailForm(request.POST)
         if form.is_valid():
@@ -258,6 +290,10 @@ def send_email(request, account_id):
             email_obj.sender = account.email_address
             email_obj.status = 'draft'  # Start as draft
             email_obj.email_date = timezone.now()
+            
+            # Set reply relationship if this is a reply
+            if reply_to_email:
+                email_obj.in_reply_to = reply_to_email.message_id
             
             # Send the email
             try:
@@ -332,11 +368,13 @@ def send_email(request, account_id):
         else:
             messages.error(request, 'Please correct the errors in the form.')
     else:
-        form = EmailForm()
+        # Initialize form with reply data if available
+        form = EmailForm(initial=initial_data)
     
     context = {
         'form': form,
         'account': account,
+        'reply_to_email': reply_to_email,
     }
     return render(request, 'mailbox/send_email.html', context)
 
@@ -604,6 +642,15 @@ def mark_email_read(request, account_id, email_id):
         email_obj.save()
         
         status = 'read' if email_obj.is_read else 'unread'
+        
+        # Handle AJAX requests
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return JsonResponse({
+                'success': True,
+                'message': f'Email marked as {status}.',
+                'is_read': email_obj.is_read
+            })
+        
         messages.success(request, f'Email marked as {status}.')
     
     return redirect('view_emails', account_id=account.id)
@@ -625,7 +672,19 @@ def delete_email(request, account_id, email_id):
         email_obj.folder = trash_folder
         email_obj.save()
         
+        # Handle AJAX requests
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return JsonResponse({
+                'success': True,
+                'message': 'Email moved to trash.'
+            })
+        
         messages.success(request, 'Email moved to trash.')
+        
+        # If accessed from email detail page, redirect to email list
+        referer = request.META.get('HTTP_REFERER', '')
+        if 'email' in referer and str(email_id) in referer:
+            return redirect('view_emails', account_id=account.id)
     
     return redirect('view_emails', account_id=account.id)
 
@@ -639,6 +698,15 @@ def star_email(request, account_id, email_id):
         email_obj.save()
         
         status = 'starred' if email_obj.is_starred else 'unstarred'
+        
+        # Handle AJAX requests
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return JsonResponse({
+                'success': True,
+                'message': f'Email {status}.',
+                'is_starred': email_obj.is_starred
+            })
+        
         messages.success(request, f'Email {status}.')
     
     return redirect('view_emails', account_id=account.id)
@@ -742,21 +810,29 @@ def bulk_mark_unread(request, account_id):
 
 @require_POST
 def bulk_delete(request, account_id):
-    """Delete multiple emails from database"""
+    """Move multiple emails to trash"""
     account = get_object_or_404(EmailAccount, id=account_id)
     
     try:
         data = json.loads(request.body)
         email_ids = data.get('email_ids', [])
         
-        deleted_count, _ = Email.objects.filter(
+        # Get or create trash folder
+        trash_folder, created = EmailFolder.objects.get_or_create(
+            account=account,
+            name='Trash',
+            defaults={'folder_type': 'trash', 'is_system': True}
+        )
+        
+        # Move emails to trash instead of deleting
+        updated_count = Email.objects.filter(
             account=account,
             id__in=email_ids
-        ).delete()
+        ).update(folder=trash_folder)
         
         return JsonResponse({
             'success': True,
-            'message': f'Deleted {deleted_count} emails permanently'
+            'message': f'Moved {updated_count} emails to trash'
         })
     except Exception as e:
         return JsonResponse({

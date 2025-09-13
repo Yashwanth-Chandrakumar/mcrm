@@ -233,6 +233,7 @@
     </style>
 </head>
 <body>
+    {% csrf_token %}
     <div class="container">
         <a href="{% url 'view_emails' account.id %}" class="back-link">
             <i class="fas fa-arrow-left"></i> Back to {{ account.name }}
@@ -245,24 +246,17 @@
                         {{ email.get_status_display }}
                     </div>
                     <div class="email-actions">
-                        <form method="post" action="{% url 'star_email' account.id email.id %}" style="display: inline;">
-                            {% csrf_token %}
-                            <button type="submit" class="action-btn {% if email.is_starred %}active{% endif %}" title="{% if email.is_starred %}Unstar{% else %}Star{% endif %}">
-                                <i class="fas fa-star"></i>
-                            </button>
-                        </form>
-                        <form method="post" action="{% url 'mark_email_read' account.id email.id %}" style="display: inline;">
-                            {% csrf_token %}
-                            <button type="submit" class="action-btn" title="{% if email.is_read %}Mark as unread{% else %}Mark as read{% endif %}">
-                                <i class="fas fa-envelope{% if email.is_read %}-open{% endif %}"></i>
-                            </button>
-                        </form>
-                        <form method="post" action="{% url 'delete_email' account.id email.id %}" style="display: inline;">
-                            {% csrf_token %}
-                            <button type="submit" class="action-btn" title="Delete" onclick="return confirm('Move this email to trash?')">
-                                <i class="fas fa-trash"></i>
-                            </button>
-                        </form>
+                        <button type="button" class="action-btn {% if email.is_starred %}active{% endif %}" title="{% if email.is_starred %}Unstar{% else %}Star{% endif %}"
+                                onclick="toggleStar({{ email.id }}, this)">
+                            <i class="fas fa-star"></i>
+                        </button>
+                        <button type="button" class="action-btn" title="{% if email.is_read %}Mark as unread{% else %}Mark as read{% endif %}"
+                                onclick="toggleReadStatus({{ email.id }}, this)">
+                            <i class="fas fa-envelope{% if email.is_read %}-open{% endif %}"></i>
+                        </button>
+                        <button type="button" class="action-btn" title="Delete" onclick="deleteEmail({{ email.id }}, this)">
+                            <i class="fas fa-trash"></i>
+                        </button>
                     </div>
                 </div>
 
@@ -337,5 +331,107 @@
             </div>
         </div>
     </div>
+
+    <script>
+        // CSRF Token helper
+        function getCSRFToken() {
+            return document.querySelector('[name=csrfmiddlewaretoken]').value;
+        }
+
+        // Individual email actions
+        function toggleStar(emailId, button) {
+            fetch(`/mailbox/{{ account.id }}/email/${emailId}/star/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCSRFToken(),
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            })
+            .then(response => {
+                if (!response.ok) throw new Error('Network response was not ok');
+                return response.json();
+            })
+            .then(data => {
+                if (data.success) {
+                    if (data.is_starred) {
+                        button.classList.add('active');
+                        button.title = 'Unstar';
+                    } else {
+                        button.classList.remove('active');
+                        button.title = 'Star';
+                    }
+                } else {
+                    alert('Error: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error toggling star. Please try again.');
+            });
+        }
+
+        function deleteEmail(emailId, button) {
+            if (confirm('Are you sure you want to move this email to trash?')) {
+                fetch(`/mailbox/{{ account.id }}/email/${emailId}/delete/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': getCSRFToken(),
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                })
+                .then(response => {
+                    if (!response.ok) throw new Error('Network response was not ok');
+                    return response.json();
+                })
+                .then(data => {
+                    if (data.success) {
+                        // Redirect back to email list
+                        window.location.href = '/mailbox/{{ account.id }}/';
+                    } else {
+                        alert('Error: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Error deleting email. Please try again.');
+                });
+            }
+        }
+
+        function toggleReadStatus(emailId, button) {
+            fetch(`/mailbox/{{ account.id }}/email/${emailId}/read/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCSRFToken(),
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            })
+            .then(response => {
+                if (!response.ok) throw new Error('Network response was not ok');
+                return response.json();
+            })
+            .then(data => {
+                if (data.success) {
+                    const icon = button.querySelector('i');
+                    if (data.is_read) {
+                        icon.className = 'fas fa-envelope-open';
+                        button.title = 'Mark as unread';
+                    } else {
+                        icon.className = 'fas fa-envelope';
+                        button.title = 'Mark as read';
+                    }
+                } else {
+                    alert('Error: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error toggling read status. Please try again.');
+            });
+        }
+    </script>
 </body>
 </html>
