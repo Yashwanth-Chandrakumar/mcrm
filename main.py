@@ -5,7 +5,6 @@ import smtplib
 import time
 import random
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
@@ -15,11 +14,15 @@ from datetime import datetime
 import pandas as pd
 
 # === Configuration ===
-DEBUG = True  # Set to True to send only one email to yashwanthsc1@gmail.com
-DAILY_EMAIL_LIMIT = 100
-CLIENT_EMAIL_LIMIT = 100  # Maximum emails per client
+DEBUG = False
+DEBUG_EMAIL = 'yashwanth2k05@gmail.com'  # Email for testing
+DAILY_EMAIL_LIMIT = 100  # Per manufacturer
 CONFIG_FILE = 'config.json'
 MAILDATA_FILE = 'maildata.xlsx'
+
+# Anti-spam measures
+MIN_DELAY_SECONDS = 5  # Minimum delay between emails
+MAX_DELAY_SECONDS = 20  # Maximum delay between emails
 
 # Thread-safe lock for file operations
 file_lock = threading.Lock()
@@ -51,42 +54,38 @@ def load_template(template_file):
         print(f"❌ Error parsing template file '{template_path}': {e}")
         return []
 
-def get_sent_emails(client_name):
-    """Get list of already sent email addresses for a client"""
-    sent_file = os.path.join('sentdata', f"{client_name}.csv")
+def get_sent_emails(manufacturer_name):
+    """Get list of already sent email addresses for a manufacturer"""
+    sent_file = os.path.join('sentdata', f"{manufacturer_name}.csv")
     sent_emails = set()
     
     if os.path.exists(sent_file):
         try:
             with open(sent_file, 'r', newline='', encoding='utf-8') as f:
                 reader = csv.reader(f)
-                next(reader, None)  # Skip header if exists
+                next(reader, None)  # Skip header
                 for row in reader:
-                    if row:  # Skip empty rows
+                    if row:
                         sent_emails.add(row[0].strip().lower())
         except Exception as e:
             print(f"⚠️ Error reading sent emails file '{sent_file}': {e}")
     
     return sent_emails
 
-def save_sent_email(client_name, email, timestamp):
+def save_sent_email(manufacturer_name, email, timestamp):
     """Save sent email to CSV file (thread-safe)"""
-    sent_file = os.path.join('sentdata', f"{client_name}.csv")
+    sent_file = os.path.join('sentdata', f"{manufacturer_name}.csv")
     
-    # Use thread-safe lock for file operations
     with file_lock:
-        # Create sentdata directory if it doesn't exist
         os.makedirs('sentdata', exist_ok=True)
-        
-        # Check if file exists to determine if we need to write header
         file_exists = os.path.exists(sent_file)
         
         try:
             with open(sent_file, 'a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 if not file_exists:
-                    writer.writerow(['Email', 'Timestamp'])  # Header
-                writer.writerow([email, timestamp])
+                    writer.writerow(['Email', 'Timestamp'])
+                writer.writerow([email.lower(), timestamp])
         except Exception as e:
             print(f"❌ Error saving sent email to '{sent_file}': {e}")
 
@@ -94,9 +93,17 @@ def load_mail_data():
     """Load email data from Excel file"""
     try:
         df = pd.read_excel(MAILDATA_FILE)
-        # Clean the data
+        
+        # Basic cleaning
         df.dropna(how='all', inplace=True)
         df.dropna(subset=['Email'], how='any', inplace=True)
+        
+        # Validate required columns
+        if 'Company Name for Emails' not in df.columns:
+            print("❌ Required column 'Company Name for Emails' not found in maildata.xlsx")
+            print(f"Available columns: {', '.join(df.columns)}")
+            return pd.DataFrame()
+        
         df.reset_index(drop=True, inplace=True)
         return df
     except FileNotFoundError:
@@ -108,6 +115,9 @@ def load_mail_data():
 
 def get_attachments(attachments_folder):
     """Get all files from the attachments folder"""
+    if not attachments_folder:
+        return []
+        
     attachments_path = os.path.join('attachments', attachments_folder)
     attachment_files = []
     
@@ -116,14 +126,11 @@ def get_attachments(attachments_folder):
             file_path = os.path.join(attachments_path, file)
             if os.path.isfile(file_path):
                 attachment_files.append(file_path)
-    else:
-        print(f"⚠️ Attachments folder '{attachments_path}' not found.")
     
     return attachment_files
 
 def create_message(config, template, recipient_data, attachments):
     """Create email message with random template selection"""
-    # Randomly select a template if multiple exist
     selected_template = random.choice(template)
     
     msg = MIMEMultipart('alternative')
@@ -131,16 +138,14 @@ def create_message(config, template, recipient_data, attachments):
     msg['To'] = recipient_data['Email']
     msg['Subject'] = selected_template['subject']
     
-    # Format the body with recipient data
     html_body = '\n'.join(selected_template['body'])
     
-    # Replace placeholders with actual data
+    # Replace placeholders
     for column in recipient_data.index:
         placeholder = f"{{{column.lower().replace(' ', '_')}}}"
         if placeholder in html_body:
             html_body = html_body.replace(placeholder, str(recipient_data[column]))
     
-    # Add HTML content
     msg.attach(MIMEText(html_body, 'html'))
     
     # Attach files
@@ -160,65 +165,8 @@ def create_message(config, template, recipient_data, attachments):
     
     return msg
 
-def test_smtp_connection(config):
-    """Test SMTP connection with detailed diagnostics"""
-    client_name = config.get('supplier_name', 'Unknown')
-    smtp_server = config['smtp_server']
-    smtp_port = config['smtp_port']
-    
-    print(f"🔍 Testing SMTP connection for {client_name}...")
-    print(f"   Server: {smtp_server}:{smtp_port}")
-    
-    try:
-        # Test basic connectivity first
-        import socket
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(10)  # 10 second timeout
-        result = sock.connect_ex((smtp_server, smtp_port))
-        sock.close()
-        
-        if result != 0:
-            print(f"❌ Cannot reach {smtp_server}:{smtp_port} - Server may be down or port blocked")
-            return False
-        else:
-            print(f"✅ Server {smtp_server}:{smtp_port} is reachable")
-            
-    except Exception as e:
-        print(f"❌ Network test failed: {e}")
-        return False
-    
-    # Test SMTP connection
-    try:
-        if smtp_port == 465:
-            server = smtplib.SMTP_SSL(smtp_server, smtp_port)
-        else:
-            server = smtplib.SMTP(smtp_server, smtp_port)
-            server.starttls()
-        
-        print(f"✅ SMTP connection established")
-        
-        # Test login
-        server.login(config['email_account'], config['password'])
-        print(f"✅ SMTP authentication successful")
-        
-        server.quit()
-        return True
-        
-    except smtplib.SMTPAuthenticationError as e:
-        print(f"❌ SMTP Authentication failed: {e}")
-        return False
-    except smtplib.SMTPConnectError as e:
-        print(f"❌ SMTP Connection error: {e}")
-        return False
-    except smtplib.SMTPException as e:
-        print(f"❌ SMTP error: {e}")
-        return False
-    except Exception as e:
-        print(f"❌ Unexpected error: {e}")
-        return False
-
 def connect_smtp(config):
-    """Establish SMTP connection with better error handling"""
+    """Establish SMTP connection"""
     try:
         if config['smtp_port'] == 465:
             server = smtplib.SMTP_SSL(config['smtp_server'], config['smtp_port'])
@@ -228,171 +176,180 @@ def connect_smtp(config):
         
         server.login(config['email_account'], config['password'])
         return server
-    except smtplib.SMTPAuthenticationError as e:
-        print(f"❌ SMTP Authentication failed: {e}")
-        return None
-    except smtplib.SMTPConnectError as e:
-        print(f"❌ SMTP Connection error: {e}")
-        return None
-    except smtplib.SMTPException as e:
-        print(f"❌ SMTP error: {e}")
-        return None
     except Exception as e:
         print(f"❌ SMTP connection failed: {e}")
         return None
 
-def send_emails_for_client(config):
-    """Send emails for a specific client configuration (thread-safe)"""
-    thread_id = threading.current_thread().ident
-    client_name = config['supplier_name']
+def select_emails_for_manufacturer(config, mail_data):
+    """
+    Select emails for a manufacturer using the correct algorithm:
+    - One email per brand per day
+    - Never repeat emails
+    - Up to DAILY_EMAIL_LIMIT total
+    - In DEBUG mode: Only select ONE email
+    """
+    manufacturer_name = config['supplier_name']
+    print(f"\n{'='*60}")
+    print(f"📊 Processing: {manufacturer_name}")
+    print(f"{'='*60}")
     
-    print(f"\n🔄 [Thread {thread_id}] Processing client: {client_name}")
+    # DEBUG MODE: Only send one test email
+    if DEBUG:
+        print(f"🔍 DEBUG MODE: Selecting only ONE test email")
+        test_recipient = mail_data.iloc[0].copy()
+        test_recipient['Email'] = DEBUG_EMAIL
+        test_recipient['First Name'] = 'Debug User'
+        return [test_recipient]
+    
+    # Get sent emails for this manufacturer
+    sent_emails = get_sent_emails(manufacturer_name)
+    print(f"📝 Already sent to {len(sent_emails)} recipients")
+    
+    # Group by brand (Company Name for Emails)
+    brands = mail_data.groupby('Company Name for Emails')
+    print(f"🏢 Total brands in database: {len(brands)}")
+    
+    selected_recipients = []
+    brands_with_unsent = 0
+    brands_exhausted = 0
+    
+    # For each brand, select ONE unsent recipient
+    for brand_name, brand_group in brands:
+        # Filter out already-sent emails
+        unsent_in_brand = brand_group[~brand_group['Email'].str.lower().isin(sent_emails)]
+        
+        if len(unsent_in_brand) == 0:
+            brands_exhausted += 1
+            continue
+        
+        brands_with_unsent += 1
+        
+        # Randomly select ONE person from this brand
+        selected_recipient = unsent_in_brand.sample(n=1).iloc[0]
+        selected_recipients.append(selected_recipient)
+        
+        # Stop if we've reached the daily limit
+        if len(selected_recipients) >= DAILY_EMAIL_LIMIT:
+            break
+    
+    print(f"\n📊 Selection Summary for {manufacturer_name}:")
+    print(f"   Brands with unsent emails: {brands_with_unsent}")
+    print(f"   Brands exhausted: {brands_exhausted}")
+    print(f"   Emails selected: {len(selected_recipients)}")
+    
+    return selected_recipients
+
+def send_emails_for_manufacturer(config, recipients):
+    """Send emails for a specific manufacturer"""
+    manufacturer_name = config['supplier_name']
+    sent_count = 0
+    failed_count = 0
+    
+    if not recipients:
+        print(f"⚠️ No recipients to send for {manufacturer_name}")
+        return 0, 0
+    
+    print(f"\n📤 Sending emails for {manufacturer_name}...")
+    
+    # Load templates
+    templates = load_template(config['templates'])
+    if not templates:
+        print(f"❌ No templates found for {manufacturer_name}")
+        return 0, len(recipients)
+    
+    # Get attachments
+    attachments = get_attachments(config.get('attachments', ''))
+    if attachments:
+        print(f"📎 Attaching {len(attachments)} files")
+    
+    # Connect to SMTP
+    server = connect_smtp(config)
+    if not server:
+        print(f"❌ Failed to connect SMTP for {manufacturer_name}")
+        return 0, len(recipients)
     
     try:
-        # Load template
-        templates = load_template(config['templates'])
-        if not templates:
-            print(f"❌ [Thread {thread_id}] No templates found for {client_name}")
-            return 0
-        
-        # Get attachments
-        attachments = get_attachments(config['attachments'])
-        if not attachments:
-            print(f"⚠️ [Thread {thread_id}] No attachments found for {client_name}")
-        else:
-            print(f"📎 [Thread {thread_id}] Found {len(attachments)} attachment(s) for {client_name}")
-        
-        # Load mail data (thread-safe as pandas operations are generally thread-safe for reading)
-        mail_data = load_mail_data()
-        if mail_data.empty:
-            print(f"❌ [Thread {thread_id}] No mail data available for {client_name}")
-            return 0
-        
-        # Get already sent emails
-        sent_emails = get_sent_emails(config['attachments'])
-        print(f"📋 [Thread {thread_id}] Found {len(sent_emails)} previously sent emails for {client_name}")
-        
-        # Filter out already sent emails
-        unsent_data = mail_data[~mail_data['Email'].str.lower().isin(sent_emails)]
-        
-        if DEBUG:
-            # In debug mode, send only one email to specified address
-            debug_data = unsent_data.head(1).copy()
-            if not debug_data.empty:
-                debug_data.loc[debug_data.index[0], 'Email'] = 'yashwanthsc1@gmail.com'
-                debug_data.loc[debug_data.index[0], 'First Name'] = f'Debug User ({client_name})'
-                # Set debug values for other common fields that might be in templates
-                if 'Company' in debug_data.columns:
-                    debug_data.loc[debug_data.index[0], 'Company'] = f'Debug Company Ltd ({client_name})'
-                if 'Supplier' in debug_data.columns:
-                    debug_data.loc[debug_data.index[0], 'Supplier'] = f'Debug Supplier ({client_name})'
-                if 'Company Phone' in debug_data.columns:
-                    debug_data.loc[debug_data.index[0], 'Company Phone'] = '+1-555-DEBUG'
-                unsent_data = debug_data
-            print(f"🔍 [Thread {thread_id}] DEBUG mode: sending only to yashwanthsc1@gmail.com for {client_name}")
-        
-        print(f"📧 [Thread {thread_id}] {len(unsent_data)} emails to send for {client_name}")
-        
-        if len(unsent_data) == 0:
-            print(f"✅ [Thread {thread_id}] All emails already sent for {client_name}")
-            return 0
-        
-        # Limit to client email limit (100 emails per client)
-        emails_to_send = unsent_data.head(CLIENT_EMAIL_LIMIT)
-        
-        # Connect to SMTP
-        server = connect_smtp(config)
-        if not server:
-            print(f"❌ [Thread {thread_id}] SMTP connection failed for {client_name}")
-            return 0
-        
-        sent_count = 0
-        batch_sent = 0
-        
-        for index, recipient in emails_to_send.iterrows():
+        for i, recipient in enumerate(recipients, 1):
+            email = recipient['Email'].strip()
+            
             try:
                 # Create and send message
                 msg = create_message(config, templates, recipient, attachments)
                 server.send_message(msg)
                 
-                # Save to sent list (thread-safe)
-                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                save_sent_email(config['attachments'], recipient['Email'], timestamp)
+                # Save to sent list (skip in debug mode to avoid polluting data)
+                if not DEBUG:
+                    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    save_sent_email(manufacturer_name, email, timestamp)
                 
                 sent_count += 1
-                batch_sent += 1
+                brand = recipient.get('Company Name for Emails', 'Unknown')
+                print(f"✅ [{i}/{len(recipients)}] Sent to {email} ({brand})")
                 
-                print(f"[Thread {thread_id}] [{sent_count}/{len(emails_to_send)}] ✅ {client_name}: Sent to {recipient['Email']}")
-                
-                # Skip delay in debug mode
-                if not DEBUG:
-                    # Random delay between emails (30-60 seconds)
-                    delay = random.uniform(30, 60)
+                # Anti-spam delay between emails
+                if i < len(recipients):
+                    if DEBUG:
+                        delay = 2  # Short delay in debug mode
+                    else:
+                        # Random delay to appear more natural
+                        delay = random.uniform(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
+                    
+                    print(f"⏳ Waiting {delay:.1f}s before next email...")
                     time.sleep(delay)
-                
-                # Reconnect after every 40 emails to avoid timeout
-                if batch_sent >= 40 and sent_count < len(emails_to_send):
-                    print(f"🔄 [Thread {thread_id}] Reconnecting SMTP after 40 emails for {client_name}...")
-                    server.quit()
-                    server = connect_smtp(config)
-                    if not server:
-                        print(f"❌ [Thread {thread_id}] SMTP reconnection failed for {client_name}")
-                        break
-                    batch_sent = 0
                     
             except Exception as e:
-                print(f"❌ [Thread {thread_id}] {client_name}: Failed to send to {recipient['Email']}: {e}")
-        
+                print(f"❌ Failed to send to {email}: {e}")
+                failed_count += 1
+                
+    finally:
         try:
             server.quit()
         except:
-            pass  # Ignore errors when closing connection
-            
-        print(f"🏁 [Thread {thread_id}] Client '{client_name}': {sent_count} emails sent successfully")
-        return sent_count
+            pass
+    
+    return sent_count, failed_count
+
+def process_manufacturer(config, mail_data):
+    """Process a single manufacturer (for parallel execution)"""
+    manufacturer_name = config['supplier_name']
+    
+    try:
+        # Select recipients
+        recipients = select_emails_for_manufacturer(config, mail_data)
+        
+        if not recipients:
+            return {
+                'manufacturer': manufacturer_name,
+                'sent': 0,
+                'failed': 0,
+                'status': 'no_recipients'
+            }
+        
+        # Send emails
+        sent, failed = send_emails_for_manufacturer(config, recipients)
+        
+        return {
+            'manufacturer': manufacturer_name,
+            'sent': sent,
+            'failed': failed,
+            'status': 'completed'
+        }
         
     except Exception as e:
-        print(f"❌ [Thread {thread_id}] Error processing client '{client_name}': {e}")
-        return 0
-
-def test_all_smtp_connections():
-    """Test SMTP connections for all clients"""
-    print("🔧 Testing SMTP Connections for All Clients")
-    print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    configs = load_config()
-    if not configs:
-        print("❌ No valid configuration found. Exiting.")
-        return
-    
-    all_working = True
-    
-    for config in configs:
-        print(f"\n{'='*50}")
-        if not test_smtp_connection(config):
-            all_working = False
-    
-    print(f"\n{'='*50}")
-    if all_working:
-        print("✅ All SMTP connections are working!")
-    else:
-        print("❌ Some SMTP connections failed. Please check the configurations.")
-    
-    return all_working
+        print(f"❌ Error processing {manufacturer_name}: {e}")
+        return {
+            'manufacturer': manufacturer_name,
+            'sent': 0,
+            'failed': 0,
+            'status': f'error: {str(e)}'
+        }
 
 def main():
-    """Main function to process all clients in parallel"""
-    import sys
-    
-    # Check for test mode
-    if len(sys.argv) > 1 and sys.argv[1] == '--test-smtp':
-        test_all_smtp_connections()
-        return
-    
-    print("🚀 Starting Cold Mailing Application (Parallel Processing)")
+    """Main function"""
+    print("🚀 Starting Cold Mailing Application")
     print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"🔧 Debug mode: {'ON' if DEBUG else 'OFF'}")
-    print(f"📊 Client email limit: {CLIENT_EMAIL_LIMIT} emails per client")
+    print(f"📊 Daily email limit per manufacturer: {DAILY_EMAIL_LIMIT}")
     
     # Load configuration
     configs = load_config()
@@ -400,48 +357,68 @@ def main():
         print("❌ No valid configuration found. Exiting.")
         return
     
-    print(f"🔀 Processing {len(configs)} clients in parallel...")
+    print(f"📋 Total manufacturers configured: {len(configs)}")
     
-    total_sent = 0
-    results = {}
+    # Load mail data once
+    mail_data = load_mail_data()
+    if mail_data.empty:
+        print("❌ No mail data available. Exiting.")
+        return
     
-    # Use ThreadPoolExecutor to run clients in parallel
+    print(f"📧 Total emails in database: {len(mail_data)}")
+    print(f"🏢 Total brands: {mail_data['Company Name for Emails'].nunique()}")
+    
+    # Process each manufacturer in parallel
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    print(f"\n{'='*60}")
+    print("🚀 Starting parallel email campaigns...")
+    print(f"{'='*60}\n")
+    
+    results = []
     with ThreadPoolExecutor(max_workers=len(configs)) as executor:
-        # Submit all client tasks
-        future_to_config = {
-            executor.submit(send_emails_for_client, config): config 
+        futures = {
+            executor.submit(process_manufacturer, config, mail_data): config
             for config in configs
         }
         
-        # Collect results as they complete
-        for future in as_completed(future_to_config):
-            config = future_to_config[future]
-            client_name = config.get('supplier_name', 'Unknown')
-            
+        for future in as_completed(futures):
+            config = futures[future]
             try:
-                sent_count = future.result()
-                results[client_name] = sent_count
-                total_sent += sent_count
-                print(f"✅ Client '{client_name}' completed: {sent_count} emails sent")
-                
+                result = future.result()
+                results.append(result)
             except Exception as e:
-                print(f"❌ Client '{client_name}' failed with error: {e}")
-                results[client_name] = 0
+                print(f"❌ Unexpected error for {config['supplier_name']}: {e}")
+                results.append({
+                    'manufacturer': config['supplier_name'],
+                    'sent': 0,
+                    'failed': 0,
+                    'status': f'unexpected_error: {str(e)}'
+                })
     
-    # Print summary
+    # Print final summary
     print(f"\n{'='*60}")
     print("📊 FINAL SUMMARY")
+    print(f"{'='*60}\n")
+    
+    total_sent = sum(r['sent'] for r in results)
+    total_failed = sum(r['failed'] for r in results)
+    
+    for result in results:
+        print(f"🏭 {result['manufacturer']}:")
+        print(f"   ✅ Sent: {result['sent']}")
+        print(f"   ❌ Failed: {result['failed']}")
+        print(f"   Status: {result['status']}\n")
+    
     print(f"{'='*60}")
-    
-    for client_name, sent_count in results.items():
-        status = "✅" if sent_count > 0 else "❌"
-        print(f"{status} {client_name}: {sent_count} emails sent")
-    
-    print(f"\n🎯 Total emails sent across all clients: {total_sent}")
+    print(f"✅ Total sent: {total_sent}")
+    print(f"❌ Total failed: {total_failed}")
+    print(f"📧 Total processed: {total_sent + total_failed}")
     print("✨ Cold mailing session completed!")
     
     if DEBUG:
-        print("\n🔍 Note: DEBUG mode was enabled - emails were sent to yashwanthsc1@gmail.com only")
+        print(f"\n🔍 DEBUG MODE: Test email sent to {DEBUG_EMAIL} only")
+        print("⚠️ No emails were saved to sent history in debug mode")
 
 if __name__ == '__main__':
     main()
